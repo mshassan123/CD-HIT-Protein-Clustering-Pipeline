@@ -1,0 +1,378 @@
+# ============================================================
+#  CD-HIT Protein Clustering Pipeline
+#  Runs on Google Colab (or any Linux Python 3 environment)
+#
+#  What this script does:
+#    1. Installs CD-HIT automatically
+#    2. Uploads your protein FASTA file
+#    3. Removes proteins < 100 amino acids
+#    4. Clusters at 80% sequence identity (c=0.8)
+#    5. Removes paralogous sequences
+#    6. Reports full statistics at every step
+#    7. Downloads results (NR FASTA + cluster CSV)
+#
+#  References:
+#    Ahmad et al. (2023)   - CD-HIT for paralog/short-seq removal
+#    Zia et al. (2024)     - 80% identity clustering criterion
+#    Chen et al. (2024)    - Non-redundant dataset via CD-HIT
+#    Ahammad et al. (2024) - Non-paralogous proteins for analysis
+#
+#  Usage: Paste this entire script into a Google Colab cell
+#         and press Run, OR run cell-by-cell after splitting.
+# ============================================================
+
+import subprocess, sys, os, csv, time
+
+# ────────────────────────────────────────────────────────────
+# STEP 1 — Install CD-HIT
+# ────────────────────────────────────────────────────────────
+print("=" * 65)
+print("  STEP 1: Installing CD-HIT".center(65))
+print("=" * 65)
+
+result = subprocess.run(
+    ["apt-get", "install", "-y", "-q", "cd-hit"],
+    capture_output=True, text=True
+)
+if result.returncode != 0:
+    print("ERROR: apt-get failed:\n", result.stderr)
+    sys.exit(1)
+
+check = subprocess.run(["which", "cd-hit"], capture_output=True, text=True)
+if check.returncode == 0:
+    print(f"  cd-hit found at: {check.stdout.strip()}")
+    print("  CD-HIT installed successfully!\n")
+else:
+    print("  ERROR: cd-hit not found after install. Exiting.")
+    sys.exit(1)
+
+
+# ────────────────────────────────────────────────────────────
+# STEP 2 — Upload FASTA File
+# ────────────────────────────────────────────────────────────
+print("=" * 65)
+print("  STEP 2: Upload Your Protein FASTA File".center(65))
+print("=" * 65)
+print("\n  Please upload your .fasta / .fa file when prompted...\n")
+
+try:
+    from google.colab import files as colab_files
+    uploaded = colab_files.upload()
+    if not uploaded:
+        print("  ERROR: No file uploaded. Re-run this script and upload a file.")
+        sys.exit(1)
+    INPUT_FASTA = list(uploaded.keys())[0]
+except ImportError:
+    # Fallback: if running outside Colab, accept command-line argument
+    if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
+        INPUT_FASTA = sys.argv[1]
+    else:
+        INPUT_FASTA = input("\n  Enter path to your FASTA file: ").strip()
+        if not os.path.exists(INPUT_FASTA):
+            print(f"  ERROR: File not found: {INPUT_FASTA}")
+            sys.exit(1)
+
+print(f"\n  File loaded : {INPUT_FASTA}")
+print(f"  File size   : {os.path.getsize(INPUT_FASTA):,} bytes\n")
+
+
+# ────────────────────────────────────────────────────────────
+# STEP 3 — Parse & Inspect Input FASTA
+# ────────────────────────────────────────────────────────────
+print("=" * 65)
+print("  STEP 3: Parsing & Inspecting Input Dataset".center(65))
+print("=" * 65)
+
+def parse_fasta(filepath):
+    """Returns list of (header, sequence) tuples."""
+    records = []
+    header, seq_parts = None, []
+    with open(filepath, "r") as fh:
+        for line in fh:
+            line = line.rstrip()
+            if line.startswith(">"):
+                if header is not None:
+                    records.append((header, "".join(seq_parts)))
+                header = line[1:].strip()
+                seq_parts = []
+            elif line:
+                seq_parts.append(line.upper())
+        if header is not None:
+            records.append((header, "".join(seq_parts)))
+    return records
+
+MIN_LENGTH = 100   # Ahmad et al., 2023
+
+all_records  = parse_fasta(INPUT_FASTA)
+lengths      = [len(s) for _, s in all_records]
+short_seqs   = [(h, s) for h, s in all_records if len(s) < MIN_LENGTH]
+valid_seqs   = [(h, s) for h, s in all_records if len(s) >= MIN_LENGTH]
+
+print(f"\n  File                    : {INPUT_FASTA}")
+print(f"  Total sequences         : {len(all_records):>8,}")
+print(f"  Sequences >= 100 aa     : {len(valid_seqs):>8,}")
+print(f"  Sequences <  100 aa     : {len(short_seqs):>8,}  <- will be REMOVED")
+print(f"  Shortest sequence       : {min(lengths):>8} aa")
+print(f"  Longest  sequence       : {max(lengths):>8} aa")
+print(f"  Average  length         : {sum(lengths)/len(lengths):>8.1f} aa")
+
+if short_seqs:
+    print(f"\n  Short sequences excluded (first 10 shown):")
+    for h, s in short_seqs[:10]:
+        print(f"    [{len(s):>3} aa]  {h[:65]}")
+    if len(short_seqs) > 10:
+        print(f"    ... and {len(short_seqs) - 10} more.")
+else:
+    print("\n  No short sequences found — all pass the 100 aa threshold.")
+print()
+
+
+# ────────────────────────────────────────────────────────────
+# STEP 4 — Write Filtered FASTA (remove short proteins)
+# ────────────────────────────────────────────────────────────
+print("=" * 65)
+print("  STEP 4: Writing Filtered FASTA (>= 100 aa only)".center(65))
+print("=" * 65)
+
+FILTERED_FASTA = "input_filtered_min100aa.fasta"
+
+with open(FILTERED_FASTA, "w") as fh:
+    for hdr, seq in valid_seqs:
+        fh.write(f">{hdr}\n")
+        for i in range(0, len(seq), 60):
+            fh.write(seq[i:i+60] + "\n")
+
+print(f"\n  Output file   : {FILTERED_FASTA}")
+print(f"  Sequences kept    : {len(valid_seqs):,}")
+print(f"  Sequences removed : {len(short_seqs):,}  (< 100 aa)\n")
+
+
+# ────────────────────────────────────────────────────────────
+# STEP 5 — Run CD-HIT at 80% identity
+# ────────────────────────────────────────────────────────────
+print("=" * 65)
+print("  STEP 5: Running CD-HIT Clustering (80% identity)".center(65))
+print("=" * 65)
+
+OUTPUT_PREFIX = "cdhit_output_80pct"
+OUTPUT_CLSTR  = OUTPUT_PREFIX + ".clstr"
+
+IDENTITY  = 0.8   # Zia et al., 2024
+WORDLEN   = 5     # recommended for c >= 0.7
+MEM_MB    = 2000
+THREADS   = 4
+
+cmd = [
+    "cd-hit",
+    "-i", FILTERED_FASTA,
+    "-o", OUTPUT_PREFIX,
+    "-c", str(IDENTITY),
+    "-n", str(WORDLEN),
+    "-M", str(MEM_MB),
+    "-T", str(THREADS),
+    "-d", "0",
+    "-g", "1",
+]
+
+print(f"\n  Command: {' '.join(cmd)}\n")
+print("-" * 65)
+
+t0 = time.time()
+proc = subprocess.run(cmd, capture_output=True, text=True)
+elapsed = time.time() - t0
+
+# Show CD-HIT's own output
+for line in (proc.stdout + proc.stderr).split("\n"):
+    print(line)
+
+print("-" * 65)
+if proc.returncode != 0:
+    print(f"\n  ERROR: CD-HIT exited with code {proc.returncode}")
+    sys.exit(1)
+print(f"\n  CD-HIT finished in {elapsed:.1f} seconds.\n")
+
+
+# ────────────────────────────────────────────────────────────
+# STEP 6 — Parse cluster file & full statistics
+# ────────────────────────────────────────────────────────────
+print("=" * 65)
+print("  STEP 6: Parsing Cluster File & Computing Statistics".center(65))
+print("=" * 65)
+
+def parse_clstr(path):
+    """Returns (clusters list, paralog_ids set)."""
+    clusters, paralog_ids = [], set()
+    current = None
+    with open(path, "r") as fh:
+        for line in fh:
+            line = line.strip()
+            if line.startswith(">Cluster"):
+                if current:
+                    clusters.append(current)
+                current = {"representative": None, "members": []}
+            elif line and current is not None:
+                parts = line.split(">")
+                if len(parts) >= 2:
+                    seq_id = parts[1].split("...")[0].strip()
+                    current["members"].append(seq_id)
+                    if line.endswith("*"):
+                        current["representative"] = seq_id
+                    else:
+                        paralog_ids.add(seq_id)
+    if current:
+        clusters.append(current)
+    return clusters, paralog_ids
+
+clusters, paralog_ids = parse_clstr(OUTPUT_CLSTR)
+
+total_input       = len(all_records)
+removed_short     = len(short_seqs)
+after_len_filter  = len(valid_seqs)
+total_clusters    = len(clusters)
+total_paralogs    = len(paralog_ids)
+non_redundant     = after_len_filter - total_paralogs
+singleton_cls     = sum(1 for c in clusters if len(c["members"]) == 1)
+redundant_cls     = total_clusters - singleton_cls
+cluster_sizes     = sorted([len(c["members"]) for c in clusters], reverse=True)
+largest_cluster   = cluster_sizes[0] if cluster_sizes else 0
+nr_size_kb        = os.path.getsize(OUTPUT_PREFIX) / 1024 if os.path.exists(OUTPUT_PREFIX) else 0
+
+print(f"""
+  INPUT
+    Total sequences uploaded        : {total_input:>8,}
+
+  STEP 4 — Short Sequence Filter (< 100 aa)
+    Removed (< 100 aa)              : {removed_short:>8,}
+    Retained (>= 100 aa)            : {after_len_filter:>8,}
+
+  STEP 5 — CD-HIT Clustering (identity >= 80%)
+    Identity threshold              : {IDENTITY*100:>7.0f}%
+    Total clusters formed           : {total_clusters:>8,}
+      Singleton clusters (unique)   : {singleton_cls:>8,}
+      Redundant clusters (>= 2 seq) : {redundant_cls:>8,}
+    Paralogous sequences removed    : {total_paralogs:>8,}
+    Largest cluster size            : {largest_cluster:>8,}  members
+
+  OUTPUT — Non-Redundant Dataset
+    Representative sequences kept   : {non_redundant:>8,}
+    Output FASTA file size          : {nr_size_kb:>7.1f}  KB
+    Output file                     : {OUTPUT_PREFIX}
+
+  REDUCTION SUMMARY
+    Total sequences removed         : {total_input - non_redundant:>8,}  ({(total_input-non_redundant)/total_input*100:.1f}%)
+    Final non-redundant dataset     : {non_redundant:>8,}  ({non_redundant/total_input*100:.1f}%)
+""")
+
+
+# ────────────────────────────────────────────────────────────
+# STEP 7 — Detailed cluster report
+# ────────────────────────────────────────────────────────────
+print("=" * 65)
+print("  STEP 7: Redundant Cluster Detail (Paralogs Removed)".center(65))
+print("=" * 65)
+
+redundant_list = sorted(
+    [c for c in clusters if len(c["members"]) > 1],
+    key=lambda c: len(c["members"]), reverse=True
+)
+
+MAX_SHOW = 50   # increase to see more clusters
+
+if not redundant_list:
+    print("\n  No redundant clusters — all sequences are unique!\n")
+else:
+    print(f"\n  Showing top {min(MAX_SHOW, len(redundant_list))} of {len(redundant_list)} redundant clusters:\n")
+    for i, cl in enumerate(redundant_list[:MAX_SHOW], 1):
+        rep      = cl["representative"] or "N/A"
+        paralogs = [m for m in cl["members"] if m != rep]
+        print(f"  Cluster {i:>4}  ({len(cl['members'])} members)")
+        print(f"    KEPT    : {rep[:68]}")
+        for p in paralogs:
+            print(f"    PARALOG : {p[:68]}")
+        print()
+    if len(redundant_list) > MAX_SHOW:
+        print(f"  ... {len(redundant_list)-MAX_SHOW} more redundant clusters not shown above.")
+        print(f"      Increase MAX_SHOW in the script to display them all.\n")
+
+
+# ────────────────────────────────────────────────────────────
+# STEP 8 — Save summary CSV & download results
+# ────────────────────────────────────────────────────────────
+print("=" * 65)
+print("  STEP 8: Saving Summary CSV & Downloading Results".center(65))
+print("=" * 65)
+
+SUMMARY_CSV = "cdhit_cluster_summary.csv"
+with open(SUMMARY_CSV, "w", newline="") as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerow(["Cluster_ID", "Size", "Representative", "Paralogs"])
+    for idx, cl in enumerate(clusters, 1):
+        rep      = cl["representative"] or ""
+        paralogs = ";".join(m for m in cl["members"] if m != rep)
+        writer.writerow([idx, len(cl["members"]), rep, paralogs])
+
+print(f"\n  Cluster summary CSV written : {SUMMARY_CSV}")
+
+output_files = [OUTPUT_PREFIX, OUTPUT_CLSTR, SUMMARY_CSV]
+
+try:
+    from google.colab import files as colab_files
+    print("\n  Downloading output files to your computer ...\n")
+    for fname in output_files:
+        if os.path.exists(fname):
+            print(f"    Downloading: {fname}")
+            colab_files.download(fname)
+        else:
+            print(f"    WARNING: file not found: {fname}")
+    print("\n  All files downloaded!")
+except ImportError:
+    print("\n  (Not running in Colab — files saved locally:)")
+    for fname in output_files:
+        if os.path.exists(fname):
+            print(f"    {os.path.abspath(fname)}")
+
+
+# ────────────────────────────────────────────────────────────
+# FINAL SUMMARY BANNER
+# ────────────────────────────────────────────────────────────
+print()
+print("=" * 65)
+print("  PIPELINE COMPLETE".center(65))
+print("=" * 65)
+print(f"""
+  Input sequences          : {total_input:,}
+  Removed (< 100 aa)       : {removed_short:,}
+  Removed (paralogs >=80%) : {total_paralogs:,}
+  ─────────────────────────────────────────────
+  Final NR dataset         : {non_redundant:,}  sequences
+
+  Output files:
+    {OUTPUT_PREFIX:<40} <- Non-redundant FASTA
+    {OUTPUT_CLSTR:<40} <- Cluster assignments
+    {SUMMARY_CSV:<40} <- Summary table (CSV)
+""")
+print("=" * 65)
+print("  References".center(65))
+print("=" * 65)
+print("""
+  Ahmad et al. (2023)
+    CD-HIT suite used for protein comparison and grouping.
+    Paralog removal and sequences < 100 aa eliminated.
+
+  Zia et al. (2024)
+    CD-HIT clustering applied at 80% sequence identity (c=0.8)
+    to ensure a non-redundant dataset.
+
+  Chen et al. (2024)
+    Non-redundant dataset ensured by excluding paralogous
+    sequences at High Identity with Tolerance (CD-HIT).
+    http://cd-hit.org
+
+  Ahammad et al. (2024)
+    Non-paralogous proteins selected for further examination
+    after paralog removal.
+""")
+print("=" * 65)
+print("  Pipeline developed for public use.".center(65))
+print("  No web server required — runs entirely in Google Colab.".center(65))
+print("=" * 65)
